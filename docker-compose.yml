@@ -1,0 +1,27 @@
+name: lazarus-keeper
+
+services:
+  keeper:
+    image: ghcr.io/lazarusprotocol/keeper-daemon:latest
+    container_name: lazarus-keeper
+    build: .
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      LAZARUS_KEEPER_SECRET: ${LAZARUS_KEEPER_SECRET:-}
+      LAZARUS_INDEXER_API_URL: ${LAZARUS_INDEXER_API_URL:-https://api.lazarusprotocol.online}
+      LAZARUS_RPC_URL: ${LAZARUS_RPC_URL:-https://soroban-testnet.stellar.org}
+      LAZARUS_NETWORK_PASSPHRASE: ${LAZARUS_NETWORK_PASSPHRASE:-Test SDF Network ; September 2015}
+      LAZARUS_VAULT_CONTRACT_ID: ${LAZARUS_VAULT_CONTRACT_ID:-CCWAH7BVPGYOEBPRFWPZIONBYUCCQH7OARGZLOD6ZV66SOAFBVA2DHD5}
+      LAZARUS_BUFFER_FLUSH_INTERVAL: ${LAZARUS_BUFFER_FLUSH_INTERVAL:-600}
+      LAZARUS_DEV_STUB_MODE: ${LAZARUS_DEV_STUB_MODE:-false}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - lazarus-net
+    restart: unless-stopped
+
+networks:
+  lazarus-net:
+    driver: bridge
