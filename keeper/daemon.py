@@ -152,7 +152,23 @@ class LazarusKeeperNode:
             "flushed_vouchers": flushed,
         }
 
+    async def register_keeper(self) -> None:
+        endpoint = f"{self.indexer_url}/api/v1/keepers"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (compatible; LazarusKeeper/1.0; +https://lazarusprotocol.online)",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        body = json.dumps({"keeper_address": self.keypair.public_key}).encode("utf-8")
+        try:
+            req = urllib.request.Request(endpoint, data=body, headers=headers, method="POST")
+            with urllib.request.urlopen(req, timeout=5):
+                pass
+        except Exception as e:
+            logger.debug("Keeper registration heartbeat notice: %s", e)
+
     async def run(self, interval: float = 5.0) -> None:
+        await self.register_keeper()
         while True:
             try:
                 await self.run_once()
@@ -163,10 +179,14 @@ class LazarusKeeperNode:
 
     async def fetch_expiring_keys(self) -> List[Dict[str, Any]]:
         endpoint = f"{self.indexer_url}/api/v1/keys/expiring"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (compatible; LazarusKeeper/1.0; +https://lazarusprotocol.online)",
+            "Accept": "application/json",
+        }
         try:
             import aiohttp
 
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(headers=headers) as session:
                 async with session.get(endpoint, timeout=5) as resp:
                     if resp.status == 200:
                         data = await resp.json()
@@ -179,7 +199,7 @@ class LazarusKeeperNode:
             raise
 
         try:
-            req = urllib.request.Request(endpoint, method="GET")
+            req = urllib.request.Request(endpoint, headers=headers, method="GET")
             with urllib.request.urlopen(req, timeout=5) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
                 return data.get("results", data if isinstance(data, list) else [])
@@ -485,10 +505,15 @@ class LazarusKeeperNode:
                         raise RuntimeError(f"Attestation failed for {tx_hash}: {e}") from e
                     await asyncio.sleep(retry_delay)
 
+        headers = {
+            "User-Agent": "Mozilla/5.0 (compatible; LazarusKeeper/1.0; +https://lazarusprotocol.online)",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
         try:
             import aiohttp
 
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(headers=headers) as session:
                 for attempt in range(max_retries):
                     try:
                         async with session.post(endpoint, json=payload, timeout=5) as resp:
@@ -513,7 +538,34 @@ class LazarusKeeperNode:
                             raise RuntimeError(f"Attestation failed for {tx_hash}: {e}") from e
                         await asyncio.sleep(retry_delay)
         except ImportError:
-            pass
+            if not self.dev_stub_mode:
+                body = json.dumps(payload).encode("utf-8")
+                for attempt in range(max_retries):
+                    try:
+                        req = urllib.request.Request(
+                            endpoint, data=body, headers=headers, method="POST"
+                        )
+                        with urllib.request.urlopen(req, timeout=5) as resp:
+                            status_code = resp.getcode()
+                            raw_body = resp.read().decode("utf-8")
+                            if status_code == 200:
+                                data = json.loads(raw_body)
+                                return {
+                                    "tx_hash": tx_hash,
+                                    "contract_id": contract_id,
+                                    "voucher": data["voucher"],
+                                    "signature": bytes.fromhex(data["signature"]),
+                                }
+                            if status_code == 202:
+                                await asyncio.sleep(retry_delay)
+                                continue
+                            raise RuntimeError(
+                                f"Attestation rejected ({status_code}): {raw_body}"
+                            )
+                    except Exception as e:
+                        if attempt == max_retries - 1:
+                            raise RuntimeError(f"Attestation failed for {tx_hash}: {e}") from e
+                        await asyncio.sleep(retry_delay)
 
         if not self.dev_stub_mode:
             raise NotImplementedError(
