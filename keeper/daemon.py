@@ -57,7 +57,7 @@ class LazarusKeeperNode:
         indexer_api_url: str,
         rpc_url: str,
         network_passphrase: str,
-        vault_contract_id: str = "CCWAH7BVPGYOEBPRFWPZIONBYUCCQH7OARGZLOD6ZV66SOAFBVA2DHD5",
+        vault_contract_id: str = "CBKFA2F7RUDGLJNE3K5X2XEXVXRJQ5AMB2NSPREDTATE2ZHDALFKPGUR",
         buffer_flush_interval: int = BUFFER_FLUSH_INTERVAL,
         dev_stub_mode: bool = False,
         server: Any = None,

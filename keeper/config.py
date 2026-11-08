@@ -35,7 +35,7 @@ class KeeperConfig:
             ),
             vault_contract_id=os.environ.get(
                 "LAZARUS_VAULT_CONTRACT_ID",
-                "CCWAH7BVPGYOEBPRFWPZIONBYUCCQH7OARGZLOD6ZV66SOAFBVA2DHD5",
+                "CBKFA2F7RUDGLJNE3K5X2XEXVXRJQ5AMB2NSPREDTATE2ZHDALFKPGUR",
             ),
             buffer_flush_interval=int(
                 os.environ.get("LAZARUS_BUFFER_FLUSH_INTERVAL", "600")
