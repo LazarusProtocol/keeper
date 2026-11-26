@@ -383,9 +383,12 @@ class LazarusKeeperNode:
                     raise RuntimeError(f"Simulation failed: {sim_resp.error}")
 
                 try:
-                    from stellar_sdk.soroban_rpc import assemble_transaction
+                    if hasattr(self.server, "prepare_transaction"):
+                        tx = await self.server.prepare_transaction(pre_tx, sim_resp)
+                    else:
+                        from stellar_sdk.soroban_rpc import assemble_transaction
 
-                    tx = assemble_transaction(pre_tx, sim_resp).build()
+                        tx = assemble_transaction(pre_tx, sim_resp).build()
                 except Exception:
                     sim_fee = getattr(sim_resp, "min_resource_fee", None) or (
                         sim_resp.get("min_resource_fee") if isinstance(sim_resp, dict) else 10_000
@@ -606,30 +609,156 @@ class LazarusKeeperNode:
             self.last_flush = time.time()
         return len(batch)
 
+    @staticmethod
+    def _encode_batch_redemption_params(
+        vouchers: List[Dict[str, Any]],
+        signatures: List[bytes],
+    ) -> List[Any]:
+        """
+        Encodes `(Vec<BumpVoucher>, Vec<BytesN<64>>)` into Soroban SCVal parameters
+        matching `LazarusVault::record_bump_batch` in `contracts/lazarus_vault/src/contract.rs`.
+        """
+        from stellar_sdk import scval
+
+        voucher_scvals = []
+        for v in vouchers:
+            # Keys sorted alphabetically to match Soroban #[contracttype] struct serialization
+            voucher_scvals.append(
+                scval.to_struct(
+                    {
+                        "bounty_amount": scval.to_int128(int(v["bounty_amount"])),
+                        "keeper": scval.to_address(str(v["keeper"])),
+                        "ledger_bumped": scval.to_uint32(int(v["ledger_bumped"])),
+                        "nonce": scval.to_uint64(int(v["nonce"])),
+                        "target_contract": scval.to_address(str(v["target_contract"])),
+                    }
+                )
+            )
+
+        sig_scvals = []
+        for sig in signatures:
+            sig_bytes = bytes.fromhex(sig) if isinstance(sig, str) else bytes(sig)
+            if len(sig_bytes) != 64:
+                raise ValueError(f"InvalidSignatureLength: expected 64 bytes, got {len(sig_bytes)}")
+            sig_scvals.append(scval.to_bytes(sig_bytes))
+
+        return [scval.to_vec(voucher_scvals), scval.to_vec(sig_scvals)]
+
+    async def _notify_indexer_redemption(
+        self, nonces: List[int], tx_hash: Optional[str] = None
+    ) -> None:
+        """Best-effort sync notifying the indexer DB after on-chain `record_bump_batch` succeeds."""
+        endpoint = f"{self.indexer_url}/api/v1/attestation/vouchers/redeem"
+        payload: Dict[str, Any] = {
+            "keeper_address": self.keypair.public_key,
+            "nonces": nonces,
+        }
+        if tx_hash:
+            payload["tx_hash"] = tx_hash
+        if self.http_post_func is not None:
+            try:
+                await self.http_post_func(endpoint, payload)
+            except Exception as exc:
+                logger.debug("Indexer redemption sync notice: %s", exc)
+            return
+
+        headers = {
+            "User-Agent": "Mozilla/5.0 (compatible; LazarusKeeper/1.0; +https://lazarusprotocol.online)",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        try:
+            import aiohttp
+
+            async with aiohttp.ClientSession(headers=headers) as session:
+                async with session.post(endpoint, json=payload, timeout=5):
+                    return
+        except ImportError:
+            pass
+        except Exception as exc:
+            logger.debug("Indexer redemption sync notice: %s", exc)
+            return
+
+        try:
+            body = json.dumps(payload).encode("utf-8")
+            req = urllib.request.Request(endpoint, data=body, headers=headers, method="POST")
+            with urllib.request.urlopen(req, timeout=5):
+                pass
+        except Exception as exc:
+            logger.debug("Indexer redemption sync notice: %s", exc)
+
     async def submit_batch_redemption(
         self,
         vouchers: List[Dict[str, Any]],
         signatures: List[bytes],
     ) -> Dict[str, Any]:
         """
-        Submits `record_bump_batch(vouchers, signatures)` to `lazarus_vault` on-chain
-        and records the redemption batch.
+        Builds, simulates, signs, and submits `record_bump_batch(vouchers, signatures)`
+        to `lazarus_vault` on-chain via Soroban RPC, then records the redemption batch.
         """
+        if len(vouchers) == 0:
+            raise ValueError("VectorMismatch: vouchers cannot be empty")
         if len(vouchers) > MAX_BATCH_SIZE:
             raise ValueError(f"Batch size {len(vouchers)} exceeds MAX_BATCH_SIZE ({MAX_BATCH_SIZE})")
         if len(vouchers) != len(signatures):
             raise ValueError("VectorMismatch: vouchers and signatures length must match")
 
-        record = {
+        record: Dict[str, Any] = {
             "vault_contract_id": self.vault_contract_id,
             "entrypoint": "record_bump_batch",
             "keeper": self.keypair.public_key,
             "vouchers": vouchers,
-            "signatures_hex": [s.hex() for s in signatures],
+            "signatures_hex": [
+                s if isinstance(s, str) else bytes(s).hex() for s in signatures
+            ],
             "submitted_at": time.time(),
+            "tx_hash": None,
         }
-        if self.server is not None and hasattr(self.server, "submit_batch_contract_call"):
-            await self.server.submit_batch_contract_call(record)
+
+        if self.dev_stub_mode or (
+            self.server is not None and hasattr(self.server, "submit_batch_contract_call")
+        ):
+            if self.server is not None and hasattr(self.server, "submit_batch_contract_call"):
+                await self.server.submit_batch_contract_call(record)
+            self.redeemed_batches.append(record)
+            return record
+
+        if self.server is None:
+            raise RuntimeError(
+                "Soroban RPC server is not configured; cannot submit on-chain record_bump_batch."
+            )
+
+        from stellar_sdk import TransactionBuilder
+
+        params = self._encode_batch_redemption_params(vouchers, signatures)
+        source_account = await self.server.load_account(self.keypair.public_key)
+        pre_tx = (
+            TransactionBuilder(source_account, self.network_passphrase, base_fee=100)
+            .append_invoke_contract_function_op(
+                contract_id=self.vault_contract_id,
+                function_name="record_bump_batch",
+                parameters=params,
+            )
+            .set_timeout(60)
+            .build()
+        )
+
+        if hasattr(self.server, "prepare_transaction"):
+            tx = await self.server.prepare_transaction(pre_tx)
+        else:
+            sim_resp = await self.server.simulate_transaction(pre_tx)
+            if hasattr(sim_resp, "error") and sim_resp.error:
+                raise RuntimeError(f"record_bump_batch simulation failed: {sim_resp.error}")
+            if isinstance(sim_resp, dict) and sim_resp.get("error"):
+                raise RuntimeError(f"record_bump_batch simulation failed: {sim_resp['error']}")
+            tx = pre_tx
+
+        tx.sign(self.keypair)
+        tx_hash = await self._broadcast_and_confirm(tx)
+        record["tx_hash"] = tx_hash
+
+        nonces = [int(v["nonce"]) for v in vouchers]
+        await self._notify_indexer_redemption(nonces, tx_hash=tx_hash)
 
         self.redeemed_batches.append(record)
         return record

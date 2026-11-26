@@ -160,6 +160,78 @@ class LazarusKeeperTestSuite(unittest.TestCase):
         self.assertEqual(res["voucher"]["nonce"], 1)
         self.assertEqual(len(res["signature"]), 64)
 
+    def test_on_chain_record_bump_batch_submission(self) -> None:
+        try:
+            from stellar_sdk import Account, Keypair
+            from stellar_sdk.operation import InvokeHostFunction
+        except ImportError:
+            self.skipTest("stellar_sdk not installed in this Python interpreter")
+
+        kp = Keypair.random()
+        prepared_txs = []
+        sent_txs = []
+        synced_payloads = []
+
+        class LiveLikeSorobanServer:
+            async def load_account(self, public_key: str) -> Account:
+                return Account(public_key, 4200)
+
+            async def prepare_transaction(self, tx: Any) -> Any:
+                prepared_txs.append(tx)
+                return tx
+
+            async def send_transaction(self, tx: Any) -> Dict[str, Any]:
+                sent_txs.append(tx)
+                return {"hash": "f" * 64, "status": "PENDING"}
+
+            async def get_transaction(self, tx_hash: str) -> Dict[str, Any]:
+                return {"hash": tx_hash, "status": "SUCCESS"}
+
+        async def mock_post(url: str, payload: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
+            synced_payloads.append((url, payload))
+            return 200, {"redeemed_nonces": payload["nonces"]}
+
+        node = LazarusKeeperNode(
+            keeper_secret=kp.secret,
+            indexer_api_url="http://localhost:8000",
+            rpc_url="https://soroban-testnet.stellar.org",
+            network_passphrase="Test SDF Network ; September 2015",
+            dev_stub_mode=False,
+            server=LiveLikeSorobanServer(),
+            http_post_func=mock_post,
+        )
+
+        vouchers = [
+            {
+                "keeper": kp.public_key,
+                "target_contract": "CBKFA2F7RUDGLJNE3K5X2XEXVXRJQ5AMB2NSPREDTATE2ZHDALFKPGUR",
+                "ledger_bumped": 550_000,
+                "bounty_amount": 1_000_000,
+                "nonce": 1,
+            },
+            {
+                "keeper": kp.public_key,
+                "target_contract": "CBKFA2F7RUDGLJNE3K5X2XEXVXRJQ5AMB2NSPREDTATE2ZHDALFKPGUR",
+                "ledger_bumped": 550_005,
+                "bounty_amount": 1_000_000,
+                "nonce": 2,
+            },
+        ]
+        signatures = [b"\x11" * 64, b"\x22" * 64]
+
+        record = asyncio.run(node.submit_batch_redemption(vouchers, signatures))
+
+        self.assertEqual(record["tx_hash"], "f" * 64)
+        self.assertEqual(len(prepared_txs), 1)
+        self.assertEqual(len(sent_txs), 1)
+        tx_envelope = sent_txs[0]
+        self.assertEqual(len(tx_envelope.signatures), 1)
+        ops = tx_envelope.transaction.operations
+        self.assertEqual(len(ops), 1)
+        self.assertIsInstance(ops[0], InvokeHostFunction)
+        self.assertEqual(len(synced_payloads), 1)
+        self.assertEqual(synced_payloads[0][1]["nonces"], [1, 2])
+
 
 if __name__ == "__main__":
     unittest.main()
