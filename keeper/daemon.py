@@ -354,15 +354,15 @@ class LazarusKeeperNode:
                 ]
 
                 soroban_data = stellar_xdr.SorobanTransactionData(
-                    ext=stellar_xdr.ExtensionPoint(0),
+                    ext=stellar_xdr.SorobanTransactionDataExt(0),
                     resources=stellar_xdr.SorobanResources(
                         footprint=stellar_xdr.LedgerFootprint(
                             read_only=read_only_ledger_keys,
                             read_write=[],
                         ),
-                        instructions=0,
-                        read_bytes=total_read_bytes,
-                        write_bytes=0,
+                        instructions=stellar_xdr.Uint32(0),
+                        disk_read_bytes=stellar_xdr.Uint32(total_read_bytes),
+                        write_bytes=stellar_xdr.Uint32(0),
                     ),
                     resource_fee=stellar_xdr.Int64(10_000),
                 )
@@ -372,7 +372,7 @@ class LazarusKeeperNode:
                 # Note: TransactionBuilder.build() increments source_account.sequence to (initial_seq + 1)
                 pre_tx = (
                     TransactionBuilder(source_account, self.network_passphrase, base_fee=100)
-                    .add_operation(op)
+                    .append_operation(op)
                     .set_soroban_data(soroban_data)
                     .set_timeout(30)
                     .build()
@@ -412,9 +412,8 @@ class LazarusKeeperNode:
                         source_account["sequence"] = initial_seq
                     tx = (
                         TransactionBuilder(source_account, self.network_passphrase, base_fee=100)
-                        .add_operation(op)
+                        .append_operation(op)
                         .set_soroban_data(final_soroban_data)
-                        .set_resource_fee(int(sim_fee))
                         .set_timeout(30)
                         .build()
                     )
